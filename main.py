@@ -1,52 +1,104 @@
+# main.py
+import os
 import streamlit as st
-from openai import OpenAI
 import yfinance as yf
+from openai import OpenAI
 
-# Replace "your_api_key_here" with your actual OpenAI API key
-client = OpenAI(api_key="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")
+st.set_page_config(page_title="Financial Smart App", layout="wide")
 
+# ---------------- Secure OpenAI key loader ----------------
+def load_openai_key():
+    # 1) Πρώτα από Streamlit Secrets (Cloud ή .streamlit/secrets.toml)
+    try:
+        return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        pass
+    # 2) Fallback σε ENV var
+    return os.getenv("OPENAI_API_KEY")
+
+OPENAI_API_KEY = load_openai_key()
+
+if not OPENAI_API_KEY:
+    st.error("❌ Δεν βρέθηκε OPENAI_API_KEY. Πρόσθεσέ το στο `.streamlit/secrets.toml` ή ως env var.")
+    st.stop()
+
+# Create OpenAI client safely
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ---------------- helper functions ----------------
+def get_stock_data(ticker, start_date='2024-01-01', end_date='2024-02-01'):
+    return yf.download(ticker, start=start_date, end=end_date)
+
+# ---------------- UI ----------------
 st.title('Interactive Financial Stock Market Comparative Analysis Tool')
 
-# Function to fetch stock data
-def get_stock_data(ticker, start_date='2024-01-01', end_date='2024-02-01'):
-    data = yf.download(ticker, start=start_date, end=end_date)
-    return data
-
 # Sidebar for user inputs
-st.sidebar.header('User Input Options')
-selected_stock = st.sidebar.text_input('Enter Stock Ticker 1', 'AAPL').upper()
-selected_stock2 = st.sidebar.text_input('Enter Stock Ticker 2', 'GOOGL').upper()
+with st.sidebar:
+    st.header('User Input Options')
+    selected_stock = st.text_input('Enter Stock Ticker 1', 'AAPL').upper().strip()
+    selected_stock2 = st.text_input('Enter Stock Ticker 2', 'GOOGL').upper().strip()
+    chart_choice_1 = st.selectbox(f'Select Chart Type for {selected_stock}', ['Line', 'Bar'])
+    chart_choice_2 = st.selectbox(f'Select Chart Type for {selected_stock2}', ['Line', 'Bar'])
 
-# Fetch stock data
+# Fetch data
 stock_data = get_stock_data(selected_stock)
 stock_data2 = get_stock_data(selected_stock2)
 
 col1, col2 = st.columns(2)
 
-# Display stock data
 with col1:
     st.subheader(f"Displaying data for: {selected_stock}")
     st.write(stock_data)
-    chart_type = st.sidebar.selectbox(f'Select Chart Type for {selected_stock}', ['Line', 'Bar'])
-    if chart_type == 'Line':
-        st.line_chart(stock_data['Close'])
-    elif chart_type == 'Bar':
-        st.bar_chart(stock_data['Close'])
+    if not stock_data.empty:
+        if chart_choice_1 == 'Line':
+            st.line_chart(stock_data['Close'])
+        else:
+            st.bar_chart(stock_data['Close'])
+
 with col2:
     st.subheader(f"Displaying data for: {selected_stock2}")
     st.write(stock_data2)
-    chart_type2 = st.sidebar.selectbox(f'Select Chart Type for {selected_stock2}', ['Line', 'Bar'])
-    if chart_type2 == 'Bar':
-        st.bar_chart(stock_data2['Close'])
-    elif chart_type2 == 'Line':
-        st.line_chart(stock_data2['Close'])
+    if not stock_data2.empty:
+        if chart_choice_2 == 'Line':
+            st.line_chart(stock_data2['Close'])
+        else:
+            st.bar_chart(stock_data2['Close'])
 
+# ---------------- Comparative analysis ----------------
 if st.button('Comparative Performance'):
-  response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-            {"role": "system", "content": "You are a financial assistant that will retrieve two tables of financial market data and will summarize the comparative performance in text, in full detail with highlights for each stock and also a conclusion with a markdown output. BE VERY STRICT ON YOUR OUTPUT"},
-            {"role": "user", "content": f"This is the {selected_stock} stock data : {stock_data}, this is {selected_stock2} stock data: {stock_data2}"}
-          ]
-    )
-  st.write(response.choices[0].message.content)
+    # Basic safety: don't send full DataFrames to the model (tokens & privacy)
+    def small_summary(df):
+        if df.empty:
+            return None
+        close = df['Close']
+        return {
+            "first": float(close.iloc[0]),
+            "last": float(close.iloc[-1]),
+            "pct_change": float((close.iloc[-1] / close.iloc[0] - 1) * 100)
+        }
+
+    s1 = small_summary(stock_data)
+    s2 = small_summary(stock_data2)
+
+    if not s1 or not s2:
+        st.error("Δεν υπάρχουν επαρκή δεδομένα για τα ticker.")
+    else:
+        prompt_text = (
+            f"Compare stocks {selected_stock} and {selected_stock2} using these metrics:\n\n"
+            f"{selected_stock}: {s1}\n"
+            f"{selected_stock2}: {s2}\n\n"
+            "Provide a concise markdown summary with bullets: performance, volatility note, highs/lows, conclusion (non-investment advice)."
+        )
+
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a financial analyst. Be concise, factual, no investment advice."},
+                    {"role": "user", "content": prompt_text}
+                ],
+                temperature=0.2,
+            )
+            st.markdown(resp.choices[0].message.content)
+        except Exception as e:
+            st.error(f"OpenAI API error: {e}")
